@@ -249,7 +249,7 @@ label splashscreen:
 
     python:
         if persistent._mas_auto_mode_enabled:
-            mas_darkMode(morning_flag)
+            mas_darkMode(mas_current_background.isFltDay())
         else:
             mas_darkMode(not persistent._mas_dark_mode_enabled)
     return
@@ -350,6 +350,9 @@ label quit:
         # save weather options
         store.mas_weather.saveMWData()
 
+        # save bgs
+        store.mas_background.saveMBGData()
+
         # remove special images
         store.mas_island_event.removeImages()
 
@@ -365,5 +368,8 @@ label quit:
 
         # clear image caches
         store.mas_sprites._clear_caches()
+
+        # xp calc
+        store.mas_xp.grant()
 
     return

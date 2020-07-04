@@ -10,6 +10,13 @@ define mas_in_intro_flow = False
 # True means disable animations, False means enable
 default persistent._mas_disable_animations = False
 
+init -998 python:
+    #We need to flow hijack here if we're running unstable mode files but on a fresh persistent
+    if "unstable" in config.version and not persistent.sessions:
+        raise Exception(
+            _("Unstable mode files in install on first session. This can cause issues.\n"
+            "Please reinstall the latest stable version of Monika After Story to ensure that there will be no data issues.")
+        )
 
 init -890 python in mas_globals:
     import datetime
@@ -107,15 +114,16 @@ init -10 python:
         SKIP_MID_LOOP_EVAL = 4
         # True if we want idle to skip mid loop eval once
 
-        # end keys
+        SCENE_CHANGE = 5
+        # TRue if want the scene to change
 
+        # end keys
 
         def __init__(self):
             """
             Constructor for the idle mailbox
             """
             super(MASIdleMailbox, self).__init__()
-
 
         # NOTE: add additoinal functions below when appropriate.
         def send_rebuild_msg(self):
@@ -124,20 +132,17 @@ init -10 python:
             """
             self.send(self.REBUILD_EV, True)
 
-
         def get_rebuild_msg(self):
             """
             Gets rebuild message
             """
             return self.get(self.REBUILD_EV)
 
-
         def send_ds_gre_type(self, gre_type):
             """
             Sends greeting type to mailbox
             """
             self.send(self.DOCKSTAT_GRE_TYPE, gre_type)
-
 
         def get_ds_gre_type(self, default=None):
             """
@@ -150,13 +155,11 @@ init -10 python:
                 return default
             return result
 
-
         def send_idle_cb(self, cb_label):
             """
             Sends idle callback label to mailbox
             """
             self.send(self.IDLE_MODE_CB_LABEL, cb_label)
-
 
         def get_idle_cb(self):
             """
@@ -164,19 +167,29 @@ init -10 python:
             """
             return self.get(self.IDLE_MODE_CB_LABEL)
 
-
         def send_skipmidloopeval(self):
             """
             Sends skip mid loop eval message to mailbox
             """
             self.send(self.SKIP_MID_LOOP_EVAL, True)
 
-
         def get_skipmidloopeval(self):
             """
             Gets skip midloop eval value
             """
             return self.get(self.SKIP_MID_LOOP_EVAL)
+
+        def send_scene_change(self):
+            """
+            Sends scene change message to mailbox
+            """
+            self.send(self.SCENE_CHANGE, True)
+
+        def get_scene_change(self):
+            """
+            Gets scene change value
+            """
+            return self.get(self.SCENE_CHANGE)
 
 
     mas_idle_mailbox = MASIdleMailbox()
@@ -306,7 +319,7 @@ init python:
         """
         Jumps to the pick a game workflow
         """
-        renpy.jump('pick_a_game')
+        renpy.jump("mas_pick_a_game")
 
 
     def mas_getuser():
@@ -363,21 +376,12 @@ init python:
         IN:
             dissolve_masks - True will dissolve masks, False will not
                 (Default; True)
-
-        ASSUMES:
-            morning_flag
-            mas_is_raining
-            mas_is_snowing
         """
         # hide the existing mask
         renpy.hide("rm")
 
         # get current weather masks
-        mask = mas_current_weather.sp_window(morning_flag)
-
-        # should we use fallbacks instead?
-        if persistent._mas_disable_animations:
-            mask += "_fb"
+        mask = mas_current_weather.get_mask()
 
         # now show the mask
         renpy.show(mask, tag="rm")
@@ -442,25 +446,39 @@ init python:
 #            config.keymap['dismiss'] = dismiss_keys
 #            renpy.display.behavior.clear_keymap_cache()
 
+
     def mas_isMorning():
-        # generate the times we need
-        sr_hour, sr_min = mas_cvToHM(persistent._mas_sunrise)
-        ss_hour, ss_min = mas_cvToHM(persistent._mas_sunset)
-        sr_time = datetime.time(sr_hour, sr_min)
-        ss_time = datetime.time(ss_hour, ss_min)
+        """DEPRECATED
+        Checks if it is day or night via suntimes
 
-        now_time = datetime.datetime.now().time()
+        NOTE: the wording of this function is bad. This does not literally
+            mean that it is morning. USE mas_isDayNow
 
-        return sr_time <= now_time < ss_time
+        RETURNS: True if day, false if not
+        """
+        return mas_isDayNow()
+
+
+    def mas_progressFilter():
+        """
+        Changes filter according to rules.
+
+        Call this when you want to update the filter.
+
+        RETURNS: True upon a filter change, False if not
+        """
+        curr_flt = store.mas_sprites.get_filter()
+        new_flt = mas_current_background.progress()
+        store.mas_sprites.set_filter(new_flt)
+
+        return curr_flt != new_flt
 
 
     def mas_shouldChangeTime():
+        """DEPRECATED
+        This no longer makes sense with the filtering system.
         """
-        Checks if we should change the day to night or night to day.
-
-        RETURNS: true if we should change day/night cycle, False otherwise
-        """
-        return morning_flag != mas_isMorning()
+        return False
 
 
     def mas_shouldRain():
@@ -633,50 +651,29 @@ init python:
         """
         return store.mas_globals.text_speed_enabled
 
-    def mas_isGameUnlocked(gamename):
-        """
-        Checks if the given game is unlocked.
-        NOTE: this is using the game_unlocks database, which only cars about
-        whether or not you have reached the appropraite level to unlock a game.
-        Each game may be disabled for other reasons not handled via
-        this system.
-
-        IN:
-            gamename - name of the game to check
-
-        RETURNS: True if the game is unlocked, false if not
-        """
-        if persistent.game_unlocks is None:
-            return False
-
-        return persistent.game_unlocks.get(gamename, False)
-
-
-    def mas_unlockGame(gamename):
-        """
-        Unlocks the given game.
-
-        IN:
-            gamename - name of the game to unlock
-        """
-        if gamename in persistent.game_unlocks:
-            persistent.game_unlocks[gamename] = True
-
-
     def mas_check_player_derand():
         """
-        Checks the player derandom list for events that are not random and derandoms them
+        Checks the player derandom lists for events that are not random and derandoms them
         """
-        for ev_label in persistent._mas_player_derandomed:
+
+        derand_list = store.mas_bookmarks_derand.getDerandomedEVLs()
+
+        #Now iter through this to derand what's rand
+        for ev_label in derand_list:
             #Get the ev
             ev = mas_getEV(ev_label)
             if ev and ev.random:
                 ev.random = False
 
-    def mas_get_player_bookmarks():
+    def mas_get_player_bookmarks(bookmarked_evls):
         """
-        Gets topics which are bookmarked by the player 
+        Gets topics which are bookmarked by the player
         Also cleans events which no longer exist
+
+        NOTE: Will NOT add events which fail the aff range check
+
+        IN:
+            bookmarked_evls - appropriate persistent variable holding the bookmarked eventlabels
 
         OUT:
             List of bookmarked topics as evs
@@ -684,13 +681,13 @@ init python:
         bookmarkedlist = []
 
         #Iterate and add to bookmarked list
-        for index in range(len(persistent._mas_player_bookmarked)-1,-1,-1):
+        for index in range(len(bookmarked_evls)-1,-1,-1):
             #Get the ev
-            ev = mas_getEV(persistent._mas_player_bookmarked[index])
+            ev = mas_getEV(bookmarked_evls[index])
 
             #If no ev, we'll pop it as we shouldn't actually keep it here
             if not ev:
-                persistent._mas_player_bookmarked.pop(index)
+                bookmarked_evls.pop(index)
 
             #Otherwise, we add it to the menu item list
             elif ev.unlocked and ev.checkAffection(mas_curr_affection):
@@ -698,33 +695,34 @@ init python:
 
         return bookmarkedlist
 
-    def mas_get_player_derandoms():
+    def mas_get_player_derandoms(derandomed_evls):
         """
         Gets topics which are derandomed by the player (in gen-scrollable-menu format)
         Also cleans out events which no longer exist
 
+        IN:
+            derandomed_evls - appropriate variable holding the derandomed eventlabels
+
         OUT:
-            List of player-derandomed topics in mas_gen_scrollable_menu form
+            List of player derandomed topics in mas_gen_scrollable_menu form
         """
         derandlist = []
 
         #Iterate and add to derand list
-        for index in range(len(persistent._mas_player_derandomed)-1,-1,-1):
+        for index in range(len(derandomed_evls)-1,-1,-1):
             #Get the ev
-            ev = mas_getEV(persistent._mas_player_derandomed[index])
+            ev = mas_getEV(derandomed_evls[index])
 
             #No ev. Pop it as we shouldn't actually keep it here
             if not ev:
-                persistent._mas_player_derandomed.pop(index)
+                derandomed_evls.pop(index)
 
             #Ev exists. Add it to the menu item list
-            elif ev.unlocked and ev.checkAffection(mas_curr_affection):
+            elif ev.unlocked:
                 derandlist.append((renpy.substitute(ev.prompt), ev.eventlabel, False, False))
 
         return derandlist
 
-init 1 python:
-    morning_flag = mas_isMorning()
 
 
 # IN:
@@ -766,7 +764,10 @@ init 1 python:
 #       if hide_monika is False - True will do nothing and False will hide
 #           emptydesk after Monika is shown.
 #       (Default: True)
-label spaceroom(start_bg=None, hide_mask=None, hide_monika=False, dissolve_all=False, dissolve_masks=False, scene_change=False, force_exp=None, hide_calendar=None, day_bg=None, night_bg=None, show_emptydesk=True):
+#   progress_filter - True will progress the filter. False will not
+#       NOTE: use this if you explicity set the filter
+#       (Default: True)
+label spaceroom(start_bg=None, hide_mask=None, hide_monika=False, dissolve_all=False, dissolve_masks=False, scene_change=False, force_exp=None, hide_calendar=None, day_bg=None, night_bg=None, show_emptydesk=True, progress_filter=True):
 
     with None
 
@@ -775,10 +776,18 @@ label spaceroom(start_bg=None, hide_mask=None, hide_monika=False, dissolve_all=F
         $ hide_mask = store.mas_current_background.hide_masks
     if hide_calendar is None:
         $ hide_calendar = store.mas_current_background.hide_calendar
-    if day_bg is None:
-        $ day_bg = store.mas_current_background.getDayRoom()
-    if night_bg is None:
-        $ night_bg = store.mas_current_background.getNightRoom()
+
+    # progress filter
+    # NOTE: filter progression MUST happen here because othrewise we many have
+    #   cases where the filter has changed (so Monika has changed)
+    #   but the BG has not (because BG is not inherently controleld by filter)
+    python:
+        if progress_filter and mas_progressFilter():
+            # NOTE: a filter change is like a scene change with all dissolve
+            scene_change = True
+            dissolve_all = True
+
+        day_mode = mas_current_background.isFltDay()
 
     if scene_change:
         scene black
@@ -786,21 +795,12 @@ label spaceroom(start_bg=None, hide_mask=None, hide_monika=False, dissolve_all=F
     python:
         monika_room = None
 
-        # MORNING CHECK
-        # establishes correct room to use
-        if mas_isMorning():
-            if not morning_flag or scene_change:
-                morning_flag = True
-                monika_room = day_bg
-
-        else:
-            if morning_flag or scene_change:
-                morning_flag = False
-                monika_room = night_bg
+        if scene_change:
+            monika_room = mas_current_background.getCurrentRoom()
 
         #What ui are we using
         if persistent._mas_auto_mode_enabled:
-            mas_darkMode(morning_flag)
+            mas_darkMode(day_mode)
         else:
             mas_darkMode(not persistent._mas_dark_mode_enabled)
 
@@ -943,74 +943,7 @@ label ch30_main:
 
 label continue_event:
     m "Now, where was I..."
-
     return
-
-label pick_a_game:
-    # we can assume that getting here means we didnt cut off monika
-
-    $ mas_RaiseShield_dlg()
-
-    python:
-        # preprocessing for games
-
-        import datetime
-        _hour = datetime.timedelta(hours=1)
-        _now = datetime.datetime.now()
-
-        # chess has timed disabling
-        if persistent._mas_chess_timed_disable is not None:
-            if _now - persistent._mas_chess_timed_disable >= _hour:
-                chess_disabled = False
-                persistent._mas_chess_timed_disable = None
-
-            else:
-                chess_disabled = True
-
-        else:
-            chess_disabled = False
-
-        # single var for readibility
-        chess_unlocked = (
-            not renpy.seen_label("mas_chess_dlg_qf_lost_ofcn_6")
-            and is_platform_good_for_chess()
-            and mas_isGameUnlocked("chess")
-            and not chess_disabled
-        )
-
-        # hangman text
-        if persistent._mas_sensitive_mode:
-            _hangman_text = _("Word Guesser")
-        else:
-            _hangman_text = _("Hangman")
-
-        # decide the say dialogue
-        play_menu_dlg = store.mas_affection.play_quip()[1]
-
-    menu:
-        m "[play_menu_dlg]"
-        "Pong." if mas_isGameUnlocked("pong"):
-            call game_pong from _call_game_pong
-        "Chess." if chess_unlocked:
-            call game_chess from _call_game_chess
-        "[_hangman_text]." if mas_isGameUnlocked('hangman'):
-            call game_hangman from _call_game_hangman
-        "Piano." if mas_isGameUnlocked('piano'):
-            call mas_piano_start from _call_play_piano
-        # "Movie":
-        #     call mas_monikamovie from _call_monikamovie
-        "Nevermind.":
-            # NOTE: changing this to no dialogue so we dont have to edit this
-            # for affection either
-            pass
-#            m "Alright. Maybe later?"
-
-    if not renpy.showing("monika idle"):
-        show monika idle at tinstant zorder MAS_MONIKA_Z with dissolve
-
-    $ mas_DropShield_dlg()
-
-    jump ch30_loop
 
 label ch30_noskip:
     show screen fake_skip_indicator
@@ -1089,20 +1022,24 @@ label ch30_nope:
 label ch30_autoload:
     # This is where we check a bunch of things to see what events to push to the
     # event list
-    $ m.display_args["callback"] = slow_nodismiss
-    $ m.what_args["slow_abortable"] = config.developer
-    $ import store.evhand as evhand
-    if not config.developer:
-        $ config.allow_skipping = False
-    $ mas_resetTextSpeed()
-    $ quick_menu = True
-    $ startup_check = True #Flag for checking events at game startup
-    $ mas_skip_visuals = False
+    python:
+        import store.evhand as evhand
 
-    # set flag to True to prevent ch30 from running weather alg
-    $ skip_setting_weather = False
+        m.display_args["callback"] = slow_nodismiss
+        m.what_args["slow_abortable"] = config.developer
 
-    $ mas_cleanEventList()
+        if not config.developer:
+            config.allow_skipping = False
+
+        mas_resetTextSpeed()
+        quick_menu = True
+        startup_check = True #Flag for checking events at game startup
+        mas_skip_visuals = False
+
+        #Set flag to True to prevent ch30 from running weather alg
+        skip_setting_weather = False
+
+        mas_cleanEventList()
 
     # set the gender
     call mas_set_gender
@@ -1112,16 +1049,17 @@ label ch30_autoload:
 
     #Affection will trigger a final farewell mode
     #If we got a fresh start, then -50 is the cutoff vs -115.
-    if (
-        persistent._mas_pm_got_a_fresh_start
-        and _mas_getAffection() <= -50
-    ):
-        $ persistent._mas_load_in_finalfarewell_mode = True
-        $ persistent._mas_finalfarewell_poem_id = "ff_failed_promise"
+    python:
+        if (
+            persistent._mas_pm_got_a_fresh_start
+            and _mas_getAffection() <= -50
+        ):
+            persistent._mas_load_in_finalfarewell_mode = True
+            persistent._mas_finalfarewell_poem_id = "ff_failed_promise"
 
-    elif _mas_getAffection() <= -115:
-        $ persistent._mas_load_in_finalfarewell_mode = True
-        $ persistent._mas_finalfarewell_poem_id = "ff_affection"
+        elif _mas_getAffection() <= -115:
+            persistent._mas_load_in_finalfarewell_mode = True
+            persistent._mas_finalfarewell_poem_id = "ff_affection"
 
 
     #If we should go into FF mode, we do.
@@ -1130,6 +1068,9 @@ label ch30_autoload:
 
     # set this to None for now
     $ selected_greeting = None
+
+    #We'll set up the background here, so other flows don't need to adjust it unless its for a specific reason
+    $ mas_startupBackground()
 
     # check if we took monika out
     # NOTE:
@@ -1369,35 +1310,36 @@ label ch30_preloop:
 
     window auto
 
-    # NOTE: keymaps will be set, but all actions will be shielded unless
-    #   desired by the appropriate flow.
-    $ mas_HKRaiseShield()
-    $ mas_HKBRaiseShield()
-    $ set_keymaps()
+    python:
+        # NOTE: keymaps will be set, but all actions will be shielded unless
+        #   desired by the appropriate flow.
+        mas_HKRaiseShield()
+        mas_HKBRaiseShield()
+        set_keymaps()
 
-    $ persistent.closed_self = False
-    $ persistent._mas_game_crashed = True
-    $ startup_check = False
-    $ mas_checked_update = False
-    $ mas_globals.last_minute_dt = datetime.datetime.now()
-    $ mas_globals.last_hour = mas_globals.last_minute_dt.hour
-    $ mas_globals.last_day = mas_globals.last_minute_dt.day
+        persistent.closed_self = False
+        persistent._mas_game_crashed = True
+        startup_check = False
+        mas_checked_update = False
+        mas_globals.last_minute_dt = datetime.datetime.now()
+        mas_globals.last_hour = mas_globals.last_minute_dt.hour
+        mas_globals.last_day = mas_globals.last_minute_dt.day
 
-    # delayed actions in here please
-    $ mas_runDelayedActions(MAS_FC_IDLE_ONCE)
+        # delayed actions in here please
+        mas_runDelayedActions(MAS_FC_IDLE_ONCE)
 
-    #Unlock windowreact topics
-    $ mas_resetWindowReacts()
+        #Unlock windowreact topics
+        mas_resetWindowReacts()
 
-    #Then prepare the notifs
-    $ mas_updateFilterDict()
+        #Then prepare the notifs
+        mas_updateFilterDict()
 
-    # save here before we enter the loop
-    $ renpy.save_persistent()
+        # save here before we enter the loop
+        renpy.save_persistent()
 
-    # check if we need to rebulid ev
-    if mas_idle_mailbox.get_rebuild_msg():
-        $ mas_rebuildEventLists()
+        # check if we need to rebulid ev
+        if mas_idle_mailbox.get_rebuild_msg():
+            mas_rebuildEventLists()
 
     if mas_skip_visuals:
         $ mas_OVLHide()
@@ -1406,14 +1348,13 @@ label ch30_preloop:
         jump ch30_visual_skip
 
     # setup scene to change on initial launch
-    $ mas_weather.should_scene_change = True
+    $ mas_idle_mailbox.send_scene_change()
 
     # rain check
-    # TODO: the weather progression alg needs to run here
-    if not mas_weather.force_weather and not skip_setting_weather:
-        $ set_to_weather = mas_shouldRain()
-        if set_to_weather is not None:
-            $ mas_changeWeather(set_to_weather)
+    $ mas_startupWeather()
+
+    #We've skipped the initial weather set, we can now clear this flag
+    $ skip_setting_weather = False
 
     # otherwise, we are NOT skipping visuals
     $ mas_startup_song()
@@ -1433,20 +1374,14 @@ label ch30_loop:
             and mas_isMoniNormal(higher=True)
         )
 
-        should_dissolve_all = (
-            mas_shouldChangeTime()
-            or mas_weather.should_scene_change
-        )
+        should_dissolve_all = mas_idle_mailbox.get_scene_change()
 
-    call spaceroom(scene_change=mas_weather.should_scene_change, dissolve_all=should_dissolve_all, dissolve_masks=should_dissolve_masks)
-
-    #This should be set back to false so we're not constantly scene changing
-    $ mas_weather.should_scene_change = False
+    call spaceroom(scene_change=should_dissolve_all, dissolve_all=should_dissolve_all, dissolve_masks=should_dissolve_masks)
 
 #    if should_dissolve_masks:
 #        show monika idle at t11 zorder MAS_MONIKA_Z
 
-# TODO: add label here to allow startup to hook past weather 
+# TODO: add label here to allow startup to hook past weather
 # TODO: move quick_menu to here
 
     # updater check in here just because
@@ -1691,6 +1626,9 @@ label ch30_minute(time_since_check):
         # split affection values prior to saving
         _mas_AffSave()
 
+        #Check if we need to lock/unlock the songs rand delegate
+        mas_songs.checkRandSongDelegate()
+
         # save the persistent
         renpy.save_persistent()
 
@@ -1698,7 +1636,7 @@ label ch30_minute(time_since_check):
 
 
 # label for things that should run about once per hour
-# NOTE: it only runs when the hour changes, so don't expect this to run 
+# NOTE: it only runs when the hour changes, so don't expect this to run
 #   on start right away
 label ch30_hour:
     $ mas_runDelayedActions(MAS_FC_IDLE_HOUR)
@@ -1714,7 +1652,7 @@ label ch30_hour:
     return
 
 # label for things that should run about once per day
-# NOTE: it only runs when the day changes, so don't expect this to run on 
+# NOTE: it only runs when the day changes, so don't expect this to run on
 #   staart right away
 label ch30_day:
     python:
@@ -1767,6 +1705,9 @@ label ch30_reset:
 
         if persistent._mas_xp_tnl < 0:
             persistent._mas_xp_tnl = store.mas_xp.XP_LVL_RATE
+        elif int(persistent._mas_xp_tnl) > (2* int(store.mas_xp.XP_LVL_RATE)):
+            # likely time travel
+            persistent._mas_xp_tnl = 2 * store.mas_xp.XP_LVL_RATE
 
         if persistent._mas_xp_hrx < 0:
             persistent._mas_xp_hrx = 0.0
@@ -1815,12 +1756,12 @@ label ch30_reset:
         #mas_isGameUnlocked should NOT return True if we're failing this condition because we use it elsewhere
         game_unlock_db = {
             "pong": "ch30_main", # pong should always be unlocked
-            "chess": "mas_unlock_chess", #NOTE: This doesn't account for chess locking for time/forever. It's handled in pick_a_game
-            "hangman": "mas_unlock_hangman",
+            "chess": "mas_unlock_chess",
+            mas_games.HANGMAN_NAME: "mas_unlock_hangman",
             "piano": "mas_unlock_piano",
         }
 
-        for game_name,game_startlabel in game_unlock_db.iteritems():
+        for game_name, game_startlabel in game_unlock_db.iteritems():
             if not mas_isGameUnlocked(game_name) and renpy.seen_label(game_startlabel):
                 mas_unlockGame(game_name)
 
@@ -1955,21 +1896,6 @@ label ch30_reset:
     # set any prompt variants for acs that can be removed here
     $ store.mas_selspr.startup_prompt_check()
 
-
-    ## certain things may need to be reset if we took monika out
-    # NOTE: this should be at the end of this label, much of this code might
-    # undo stuff from above
-    python:
-        if store.mas_dockstat.retmoni_status is not None:
-            monika_chr.remove_acs(mas_acs_quetzalplushie)
-
-            #We don't want to set up any drink vars/evs if we're potentially returning home this sesh
-            MASConsumable._reset()
-
-            #Let's also push the event to get rid of the thermos too
-            if not mas_inEVL("mas_consumables_remove_thermos"):
-                queueEvent("mas_consumables_remove_thermos")
-
     # make sure nothing the player has derandomed is now random
     $ mas_check_player_derand()
 
@@ -2005,8 +1931,11 @@ label ch30_reset:
         $ persistent._mas_filereacts_gift_aff_gained = 0
         $ persistent._mas_filereacts_last_aff_gained_reset_date = today
 
-    #Check if we need to unlock the songs rand delegate
+    #Check if we need to lock/unlock the songs rand delegate
     $ mas_songs.checkRandSongDelegate()
+
+    #Now check the analysis ev
+    $ store.mas_songs.checkSongAnalysisDelegate()
 
     #Run a confirmed party check within a week of Moni's bday
     $ mas_confirmedParty()
@@ -2021,4 +1950,32 @@ label ch30_reset:
 
     #Set our TOD var
     $ mas_setTODVars()
+
+    python:
+        if seen_event('mas_gender'):
+            mas_unlockEVL("monika_gender_redo","EVE")
+
+        if seen_event('mas_preferredname'):
+            mas_unlockEVL("monika_changename","EVE")
+
+    #Check BGSel topic unlocked state
+    $ mas_checkBackgroundChangeDelegate()
+
+    # build background filter data and update the current filter progression
+    $ store.mas_background.buildupdate()
+
+    ## certain things may need to be reset if we took monika out
+    # NOTE: this should be at the end of this label, much of this code might
+    # undo stuff from above
+    python:
+        if store.mas_dockstat.retmoni_status is not None:
+            monika_chr.remove_acs(mas_acs_quetzalplushie)
+
+            #We don't want to set up any drink vars/evs if we're potentially returning home this sesh
+            MASConsumable._reset()
+
+            #Let's also push the event to get rid of the thermos too
+            if not mas_inEVL("mas_consumables_remove_thermos"):
+                queueEvent("mas_consumables_remove_thermos")
+
     return

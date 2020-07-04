@@ -7,17 +7,49 @@ python early:
 # uncomment this if you want syntax highlighting support on vim
 #init -1 python:
 
+    class MASFilterException(Exception):
+        """
+        General filter exceptions
+        """
+
+        def __init__(self, msg):
+            """
+            Constructor
+
+            IN:
+                msg - messgae to show
+            """
+            self.msg = msg
+
+        def __str__(self):
+            return self.msg
+
+
+    class MASInvalidFilterException(MASFilterException):
+        """
+        Use when an invalid filter is being used
+        """
+
+        def __init__(self, bad_flt):
+            """
+            Constructor
+
+            IN:
+                bad_flt - the invalid filter being used
+            """
+            self.msg = "'{0}' is not a valid filter".format(bad_flt)
+
+
     class MASFilterable(renpy.Displayable):
         """
         Special displayable that adjusts its image based on filter.
         Also includes surface caching, if desired.
 
         PROPERTIES:
-                caching.
             flt - filter we last used
         """
 
-        def __init__(self, 
+        def __init__(self,
                 focus=None,
                 default=False,
                 style='default',
@@ -42,20 +74,26 @@ python early:
         # NOTE: extended classes should impelement the render function.
 
 
-    # TODO: use this wwith standard sprites. (think ConditionSwitch with
-    #   morning flag. NOTE: wait until room deco as that is where this will
-    #   actually matter.
     class MASFilterableSprite(MASFilterable):
         """
-        Basic filterable sprite that changes for filter.
-        This has NO x/y support
+        Generic Filterable Sprite with Highlight support
+
+        Potentially more optimal than MASFilterSwitch, but likely to have less
+        configuration.
+
+        NOTE:
+            Many of the style properties will likely NOT work with this.
+            If you can make it work, submit a PR.
 
         PROPERTIES:
-            img_obj - the Image object represnting this sprite
+            img_path - image path of this sprite
+            img_obj = Image object of this sprite
+            highlight - MASFilterMap of highlights to use
         """
 
         def __init__(self,
                 image_path,
+                highlight,
                 focus=None,
                 default=False,
                 style='default',
@@ -66,8 +104,8 @@ python early:
             Constructor
 
             IN:
-                image_path - image path (or Image) of the sprite to use
-                remaining properties are sent to Displayable
+                image_path - MUST be an image path string.
+                highlight - MASFilterMap object of highlights to apply
             """
             super(MASFilterable, self).__init__(
                 focus=focus,
@@ -76,27 +114,799 @@ python early:
                 _args=_args,
                 **properties
             )
+            self.img_path = image_path
             self.img_obj = Image(image_path)
+            self.highlight = highlight
+
+        def __gen_hl(self):
+            """
+            Builds highlight Image based on current filters and cache
+
+            REUTRNS: Image to use as highlight, None if we shouldnt make filter
+            """
+            # no highlight, no worry
+            if self.highlight is None:
+                return None
+
+            # check cache
+            img_key = (self.flt, self.img_path)
+            hlg_c = store.mas_sprites._gc(store.mas_sprites.CID_HLG)
+            if img_key in hlg_c:
+                return hlg_c[img_key]
+
+            # get hlcode
+            hlcode = self.highlight.get(self.flt)
+
+            # check if we even have highlight for this filter
+            if hlcode is None:
+                hlg_c[img_key] = None
+                return None
+
+            # we have a highlight, so lets build
+            new_img = store.mas_sprites._bhlifp(self.img_path, hlcode)
+            hlg_c[img_key] = new_img
+            return new_img
 
         def render(self, width, height, st, at):
+            """
+            Render function
+            """
 
-            # need new render
-            self.flt = store.mas_sprites._decide_filter()
+            self.flt = store.mas_sprites.get_filter()
 
-            # prepare filtered image
+            # generate image
             new_img = store.mas_sprites._gen_im(self.flt, self.img_obj)
 
-            # render and blit
-            render = renpy.render(new_img, width, height, st, at)
-            rw, rh = render.get_size()
-            rv = renpy.Render(rw, rh)
-            rv.blit(render, (0, 0))
+            # then highlight
+            hl_img = self.__gen_hl()
+
+            # NOTE: branching this for efficiency.
+            #   we woudl still need to branch once to check of hl is valid,
+            #   so we don't lose anything in branching the render into two
+            #   separate paths. Non-highlights get a slightly faster render.
+            if hl_img is None:
+                # no looping, just do a quick render
+
+                # render and blit
+                render = renpy.render(new_img, width, height, st, at)
+                rw, rh = render.get_size()
+                rv = renpy.Render(rw, rh)
+                rv.blit(render, (0, 0))
+
+            else:
+                # loop render
+                render_list = [
+                    renpy.render(img, width, height, st, at)
+                    for img in (new_img, hl_img)
+                ]
+
+                # size is determined by the image render
+                rw, rh = render_list[0].get_size()
+                rv = renpy.Render(rw, rh)
+
+                # loop blit
+                for render in render_list:
+                    rv.blit(render, (0, 0))
 
             # save
             return rv
 
         def visit(self):
-            return [self.img_obj]
+            self.flt = store.mas_sprites.get_filter()
+
+            # prepare filtered image
+            new_img = store.mas_sprites._gen_im(self.flt, self.img_obj)
+
+            # and highlight
+            hl_img = self.__gen_hl()
+
+            # decide what to return
+            if hl_img is None:
+                return [new_img]
+
+            return [new_img, hl_img]
+
+
+    def MASFilterSwitch(img):
+        """
+        Builds a condition switch that applies appropriate filters.
+
+        NOTE: as this returns a ConditionSwitch, use this when you need
+            more renpy-based control over an image.
+
+        IN:
+            img - image path/ImageBase to build filter switch for
+                NOTE: CANNOT BE A DISPLAYABLE
+
+        RETURNS: ConditionSwitch for filters
+        """
+        if isinstance(img, basestring):
+            img = renpy.substitute(img)
+
+        args = []
+        for flt in store.mas_sprites.FILTERS.iterkeys():
+
+            # condition
+            args.append("store.mas_sprites.get_filter() == '{0}'".format(flt))
+
+            # filtered image
+            args.append(store.mas_sprites._gen_im(flt, img))
+
+        return ConditionSwitch(*args)
+
+
+    def MASLiteralFilterSwitch(def_img, filterize_def, **flt_pairs):
+        """
+        Builds a filter switch that lets you explicitly define the images
+        for a filter.
+
+        NOTE: this is a bad choice to use UNLESS you have a good default.
+
+        IN:
+            def_img - the default image to use for any filter not defined.
+            filterize_def - True will apply filters to the default image
+                as appropraite, False will NOT apply filters.
+                Setting this as False may result in a sprite that looks shit
+                in certain settings.
+            **flt_pairs - name=value args for specific filters:
+                name: filter enum (day/night/etc...)
+                value: the image value to use for that filter
+
+        RETURNS: ConditionSwitch with filter support
+        """
+        return MASDictFilterSwitch(def_img, filterize_def, flt_pairs)
+
+
+    def MASDictFilterSwitch(def_img, filterize_def, flt_pairs):
+        """
+        Builds a filter switch that lets you explicitly define the images
+        for a filter.
+
+        NOTE: this is a bad choice to use UNLESS you have a good default.
+
+        IN:
+            def_img - the default image to use for any filter not defined.
+            filterize_def - True will apply filters to the default image
+                as appropraite, False will NOT apply filters.
+                Setting this as False may result in a sprite that looks shit
+                in certain settings.
+            flt_pairs - dict mapping filtesr to images
+                key: filter enum (day/night/etc...)
+                value: the image value to use for that filter
+
+        RETURNS: ConditionSwitch with filter support
+        """
+        args = []
+
+        # process explicit filter pairs
+        for flt in flt_pairs:
+            if flt in store.mas_sprites.FILTERS:
+                # condition
+                args.append("mas_isCurrentFlt('{0}')".format(flt))
+
+                # image
+                args.append(flt_pairs[flt])
+
+        # add default
+        if filterize_def:
+
+            # default should be filterized
+            for flt in store.mas_sprites.FILTERS.iterkeys():
+
+                # only use the filtesr we have not already added
+                if flt not in flt_pairs:
+                    # condition
+                    args.append("mas_isCurrentFlt('{0}')".format(flt))
+
+                    # image
+                    args.append(store.mas_sprites._gen_im(flt, def_img))
+
+        else:
+            # otherwise set as just default
+            args.append("True")
+            args.append(def_img)
+
+        return ConditionSwitch(*args)
+
+
+    def MASDayNightFilterSwitch(day_img, night_img):
+        """
+        Builds a filter switch that changes image based on if the current flt
+        is a day/night filter.
+
+        This does NOT apply any filters.
+
+        IN:
+            day_img - image to return if day flt is in use
+            night_img - image to return if night flt is in use
+
+        RETURNS: ConditionSwitch that works with day/night filters.
+        """
+        return ConditionSwitch(
+            "store.mas_current_background.isFltDay()", day_img,
+            "store.mas_current_background.isFltNight()", night_img
+        )
+
+
+    def MASFilteredSprite(flt, img):
+        """
+        Generates an already filtered version of the given image
+
+        IN:
+            flt - filter to use
+            img_base - image path/ImageBase to build filtered sprite for
+
+        RETURNS: Displayable of the filtered image
+        """
+        return renpy.easy.displayable(store.mas_sprites._gen_im(flt, img))
+
+
+    def MASFallbackFilterDisplayable(**filter_pairs):
+        """
+        Generates a dynamic displayable for filters that applies fallback
+        mechanics. If you don't need fallback mechanics, use the filter
+        switches.
+
+        IN:
+            **filter_pairs - filter=val args to use. invalid filters are
+                ignored.
+
+        RETURNS: Dynamic displayable that handles fallback filters
+        """
+        return DynamicDisplayable(
+            mas_fbf_select,
+            MASFilterMapFallback(**filter_pairs)
+        )
+
+
+    def MASFilterWeatherDisplayable(use_fb, **filter_pairs):
+        """
+        Generates a dynamic displayable that maps filters to weathers for
+        arbitrary objects.
+
+        This supports fallback-based value getting. For example:
+            Assuming there are 3 precip types (pt - 1, 2, 3)
+            and there are 4 filters (flt - A, B, C, D)
+            Fallback is denoted by fb
+            Precip type 1 is the DEFAULT precip type.
+
+            Let's say the configuration for this MASFilterWeatherDisp is:
+
+            flt A - pt 1, 2, 3
+            flt B - pt 1, 3     - fb: A
+            flt C - pt 2        - fb: B
+
+            flt B is a fallback for flt D, but flt D is NOT defined in this 
+            MASFilterWeatherDisp.
+
+            This is what would happen for combinations of filter, precip_type,
+            and use_fb settings:
+
+            Current flt: A - Current pt: 2 - use_fb: any
+            In this case, flt A is defined and has a value for precip type 2.
+            The image at flt A, pt 2 is selected.
+
+            Current flt: B - Current pt: 3 - use_fb: any
+            In this case, flt B is defined and has a value for pt 3. The image
+            at flt B, pt 3 is selected.
+
+            Current flt: B - Current pt: 2 - use_fb: True
+            In this case, flt B does not have a precip_type of 2. Since we are
+            using fallback mode and flt A is a fallback of B, the image at
+            flt A, pt 2 is selected.
+
+            Current flt: B - Current pt: 2 - use_fb: False
+            This is the same case as above except we are NOT using fallback
+            mode. In this case, the image at flt B, pt 1 is selected since it 
+            is the default precip type.
+
+            Current flt: C - Current pt: 3 - use_fb: True
+            In this case, flt C does not have a pt of 3. Since we are using
+            fallback mode and flt B is a fallback of C, the image at flt B, 
+            pt 3 is selected.
+
+            Current flt: C - Current pt: 3 - use_fb: False
+            This case would NEVER happen because an exception would be raised
+            on startup. If use_fb is False, a default precip type must be
+            defined for all filters.
+
+            Current flt: D - Current pt: 3 - use_fb: True
+            In this case, flt D is not defined in this MASFilterWeatherDisp.
+            Since we are using fallback mode and flt B is a fallback of flt D,
+            the image at flt B, pt 3 is selected.
+
+            Current flt: D - Current pt: 3 - use_fb: False
+            In thise, flt D is not defined. Even though we are NOT using 
+            fallback mode, since flt B is a fallback of flt D, the image at
+            flt B, pt 3 is selected.
+
+            Current flt: D - Current pt: 2 - use_fb: True
+            In this case, flt D is not defined, but flt B does NOT have an
+            image for pt 2. Since we are using fallback mode, flt B is a
+            fallback of flt D, and flt A is a fallback of flt B, the image at
+            flt A, pt 2 is selected.
+
+            Current flt: D - Current pt: 2 - use_fb: False
+            In thise case, flt D is not defined. Since we are NOT using
+            fallback mode and flt B does NOT have an image for pt 2, the image
+            at flt B, pt 1 is selected as it is the default precip type.
+
+        In terms of filter_pairs, if fallback-based getting is used, then
+        only the base filters need a PRECIP_TYPE_DEF to be valid for all
+        filter+weather type combinations. If normal getting is used, then
+        every filter will need PRECIP_TYPE_DEF to be set or else images may
+        not exist for a filter. This is checked on startup at init level 2.
+
+        IN:
+            use_fb - set to True to use filter fallback-based value getting.
+                This will use the filter fallback mapping to retrieve values
+                for a precip_type if a selected filter does not have a value
+                for a precip_type. See above for an example.
+                False will use standard value getting.
+            **filter_pairs - fitler pairs to pass directly to 
+                MASFilterWeatherMap
+
+        RETURNS: DynamicDisplayable that respects Filters and weather.
+        """
+        return MASFilterWeatherDisplayableCustom(
+            mas_fwm_select,
+            use_fb,
+            **filter_pairs
+        )
+
+
+    def MASFilterWeatherDisplayableCustom(dyn_func, use_fb, **filter_pairs):
+        """
+        Version of MASFilterWeatherDisplayable that accepts a custom function
+        to use instead of the default mas_fwm_select.
+
+        See MASFilterWeatherDisplayable for explanations of this kind of disp.
+
+        NOTE: in general, you should use MASFilterWeatherDisplayable.
+        """
+        # build new MASFilterWeatherMap
+        new_map = MASFilterWeatherMap(**filter_pairs)
+        new_map.use_fb = use_fb
+
+        # add to DB and set ID
+        new_id = store.mas_sprites.FW_ID + 1
+        store.mas_sprites.FW_DB[new_id] = new_map
+        store.mas_sprites.FW_ID += 1
+
+        # return DynDisp
+        return DynamicDisplayable(dyn_func, new_map)
+
+
+init -2 python:
+    
+    def mas_fwm_select(st, at, mfwm):
+        """
+        Selects an image based on current filter and weather.
+
+        IN:
+            st - renpy related
+            at - renpy related
+            mfwm - MASFilterWeatherMap to select image wtih
+
+        RETURNS: dynamic disp output
+        """
+        return (
+            mfwm.fw_get(
+                store.mas_sprites.get_filter(),
+                store.mas_current_weather
+            ),
+            None
+        )
+
+
+    def mas_fbf_select(st, at, mfmfb):
+        """
+        Selects an image based on current filter, respecting fallback
+        mechanics.
+
+        IN:
+            st - renpy related
+            at - renpy related
+            mfmfb - MASFilterMapFallback object to select image with
+
+        RETURNS: dynamic disp output
+        """
+        return mfmfb.get(store.mas_sprites.get_filter()), None
+
+
+init 1 python in mas_sprites:
+
+    def _verify_fwm_db():
+        """
+        Verifies that data in the FW_DB is correct.
+        MASFilterWeatherMaps are valid if:
+            1. if the MFWM is fallback-based:
+                a) All filters provided include a fallback filter with
+                    PRECIP_TYPE_DEF set.
+            2. If the MFWM is standard:
+                a) All filters contain a PRECIP_TYPE_DEF set.
+
+        Raises all errors.
+        """
+        for mfwm_id, mfwm in FW_DB.iteritems():
+            _verify_mfwm(mfwm_id, mfwm)
+
+
+    def _verify_mfwm(mfwm_id, mfwm):
+        """
+        Verifies a MASFilterWeatherMap object.
+
+        Raises all errors.
+
+        IN:
+            mfwm_id - ID of the MASFilterWeatherMap object
+            mfwm - MASFilterWeatherMap object to verify
+        """
+        if mwfm.use_fb:
+            # fallback-based
+
+            # contains all flts that have a valid default fallback somewhere.
+            flt_defs = {}
+
+            for flt in mfwm.flts():
+                if not _mfwm_find_fb_def(mfwm, flt, flt_defs):
+                    raise Exception(
+                        (
+                            "MASFilterWeatherMap does not have default "
+                            "precip type set in the fallback chain for "
+                            "filter '{0}'. ID: {1}"
+                        ).format(
+                            flt,
+                            mfwm_id
+                        )
+                    )
+
+        else:
+            # standard
+            for flt in mfwm.flts():
+                wmap = mfwm._raw_get(flt)
+                if wmap._raw_get(store.mas_weather.PRECIP_TYPE_DEF) is None:
+                    raise Exception(
+                        (
+                            "MASFilterWeatherMap does not have a default "
+                            "precip type set for filter '{0}'. ID: {1}"
+                        ).format(
+                            flt,
+                            mfwm_id
+                        )
+                    )
+
+
+    def _mfwm_find_fb_def(mfwm, flt, flt_defs):
+        """
+        Finds fallbacks from a starting flt that are covered with a default
+        precip type.
+
+        IN:
+            mfwm - MASFilterWeatherMap object we are checking
+            flt - filter we are checking for fallbacks
+            flt_defs - dict containing keys of filters that already have known
+                defaults in their fallback chains.
+
+        OUT:
+            flt_defs - additional filters with known defaults are added to this
+                dict as we go through the fallback chain of the given flt.
+
+        RETURNS: True if we found a non-None default precip type. False if not
+        """
+        # check if filter has already been checked.
+        if flt in flt_defs:
+            return True
+
+        # otherwise begin fallback chains
+        memo = {}
+        ord_memo = []
+        curr_flt = _find_next_fb(flt, memo, ord_memo)
+        while not mfwm.has_def(curr_flt):
+            nxt_flt = _find_nxt_fb(curr_flt, memo, ord_memo)
+
+            # if filter has not changed, we are done searching.
+            if nxt_flt == curr_flt:
+                # we should have returned True somewhere if we found a default.
+                return False
+
+            if nxt_flt in flt_defs:
+                # this chain of fallbacks has already been resolved to a
+                # a default
+                flt_defs.update(memo)
+                return True
+
+            curr_flt = nxt_flt
+
+        # if we got here, then we found a default at the current flt.
+        # save the results and return True
+        flt_defs.update(memo)
+        return True
+
+
+    def _find_circ_fb(flt, memo):
+        """
+        Tries to find circular fallbacks.
+        Assumes that the current flt has not been placed into memo yet.
+
+        IN:
+            flt - flt we are checking
+            memo - dict of all flts we traversed here
+
+        OUT:
+            memo - if False is returned, all keys in this memo are deemed to
+                be non-circular fallbacks.
+
+        RETURNS: True if circular fallback is found, False otherwise
+        """
+        # if we find this in the memo, we have a circular dependcy
+        if flt in memo:
+            return True
+
+        # otherwise mark that we found this flt
+        memo[flt] = True
+
+        # get next flt and check if we are done
+        next_flt = _rslv_flt(flt)
+        if next_flt == flt:
+            FLT_BASE[flt] = True
+            return False
+
+        # recursively check flts
+        return _find_circ_fb(next_flt, memo)
+
+
+    def _find_next_fb(flt, memo, ordered_memo):
+        """
+        Finds next filter and stores in memo and ordered memo
+
+        IN:
+            flt - filter to find next filter for
+            
+        OUT:
+            memo - dict to add the next filter as a key if not None
+            ordered memo - list to append the next filter if not None
+
+        RETURNS: the next filter, or None if no next filter.
+        """
+        nxt_flt = _rslv_flt(flt)
+        if nxt_flt != flt:
+            memo[nxt_flt] = True
+            ordered_memo.append(nxt_flt)
+
+        return nxt_flt
+
+
+    def _verify_flt_fb():
+        """
+        Verifies that there are no circular fallbacks in the filter
+        fallback dict.
+
+        Raises an error if circular fallbacks are found
+        """
+        non_cd = {}
+
+        for flt in FLT_FB:
+            memo = {}
+            if _find_circ_fb(flt, memo):
+                raise Exception("filter '{0}' has a circular fallback".format(
+                    flt
+                ))
+
+            # otherwise good filter fallbac train
+            non_cd.update(memo)
+
+
+    # do verifications
+    _verify_flt_fb()
+    _verify_fwm_db()
+
+
+init -1 python in mas_sprites:
+
+    __ignore_filters = True
+    # set to prevent additional filters being added when inappropriate
+
+
+init -99 python in mas_sprites:
+    import store
+    import store.mas_utils as mas_utils
+
+    FW_ID = 1
+
+    FW_DB = {}
+    # internal collection of all MASFitlerWeatherDisplayable flt objects.
+    # (basically a dict of MASFilterWeatherMap objects)
+    # this is primarily used for verification later.
+    # IDs are generic integers.
+
+    # Filtering Framework
+    # TODO: consider making the filter dict use Curryables so custom filters
+    #   can use non-Matrixcolor-based logic
+    #   import renpy.curry.Curry # but do we really need this?
+
+    # filter enums
+    FLT_DAY = "day"
+    FLT_NIGHT = "night"
+    FLT_SUNSET = "sunset"
+
+    # filter dict
+    FILTERS = {
+        FLT_DAY: store.im.matrix.identity(),
+        FLT_NIGHT: store.im.matrix.tint(0.59, 0.49, 0.55),
+        FLT_SUNSET: store.im.matrix.tint(0.93, 0.82, 0.78),
+    }
+
+    # filter fallback dict
+    # key: filter
+    # value: filter that should be considered "base" filter
+    FLT_FB = {
+        FLT_SUNSET: FLT_DAY
+    }
+
+    # contains all base filters. These are filtesr without a fallback.
+    # this is populated during filter fallback verification and is availabe
+    # for use AFTER init level 1.
+    # key: filter
+    # value: Ignored.
+    FLT_BASE = {}
+
+    # should be false until init -1
+    __ignore_filters = False
+
+    # global filter variable.
+    # NOTE: we keep this out of mas_globals to prevent crashes.
+    __flt_global = FLT_DAY
+
+
+    def add_filter(flt_enum, imx, base=None):
+        """
+        Adds a filter to the global filters
+        You can also use this to override built-in filters.
+
+        NOTE: if you plan to use this, please use it before init level -1
+        Filters beyond this level will be ignored.
+
+        NOn-pythonable filter names are ignored
+
+        IN:
+            flt_enum - enum key to use as a filter.
+            imx - image matrix to use as filter
+            base - filter to use as a backup for this filter. Any images
+                that are unable to be shown for flt_enum will be revert to
+                the base filter. 
+                This should also be a FLT_ENUM.
+                This is checked to make sure it is a valid, preexisting enum,
+                so if chaining multiple bases, add them in order.
+                If None, no base is given for the flt.
+                (Default: None)
+        """
+        # check init
+        if __ignore_filters:
+            mas_utils.writelog(
+                "[Warning!]: Cannot add filter '{0}' after init -1\n".format(
+                    flt_enum
+                )
+            )
+            return
+
+        # check name arg able
+        if not _test_filter(flt_enum):
+            return
+
+        # check base if given
+        if base is not None:
+            if base not in FILTERS:
+                mas_utils.writelog(
+                    (
+                        "[Warning!]: Cannot add filter '{0}' with base '{1}', "
+                        "base flt not exist\n"
+                    ).format(flt_enum, base)
+                )
+                return
+
+            if not _test_filter(base):
+                return
+
+            FLT_FB[flt_enum] = base
+
+        FILTERS[flt_enum] = imx
+
+
+    def _decide_filter():
+        """DEPRECATED
+        Please use get_filter
+        """
+        return get_filter()
+
+
+    def get_filter():
+        """
+        Returns the current filter
+
+        RETURNS: filter to use
+        """
+        return __flt_global
+
+
+    def is_filter(flt):
+        """
+        Checks if the given filter is a valid filter
+
+        IN:
+            flt - filter enum to check
+
+        RETURNS: True if valid filter, False if not
+        """
+        return flt in FILTERS
+
+
+    def _rslv_flt(flt):
+        """
+        Gets base filter for a flt.
+
+        IN:
+            flt - flt to get base filter for
+
+        RETURNS: base flt for flt, or the flt itself if no base
+        """
+        return FLT_FB.get(flt, flt)
+
+
+    def set_filter(flt_enum):
+        """
+        Sets the current filter if it is valid.
+        Invalid filters are ignored.
+
+        IN:
+            flt_enum - filter to set
+        """
+        global __flt_global
+        if flt_enum in FILTERS:
+            __flt_global = flt_enum
+
+
+    def _test_filter(flt_enum):
+        """
+        Checks if this filter enum can be a filter enum.
+
+        Logs to mas log if there are errors
+
+        IN:
+            flt_enum - filter enum to test
+
+        RETURNS: True if passed test, False if not
+        """
+        fake_context = {flt_enum: True}
+        try:
+            eval(flt_enum, fake_context)
+            return True
+        except:
+            mas_utils.writelog(
+                (
+                    "[Warning!]: Cannot add filter '{0}'. Name is not "
+                    "python syntax friendly\n"
+                ).format(flt_enum)
+            )
+
+        return False
+
+
+init -98 python:
+
+    # global filter-based functions
+    # NOTE: only put the most used filter checks.
+
+    def mas_isCurrentFlt(flt):
+        """
+        Checks if the given filter is the current filter.
+
+        IN:
+            flt - filter to check
+
+        RETURNS: True if flt is the current filter, false if not
+        """
+        return store.mas_sprites.get_filter() == flt
 
 
 # this should be after sprite-chart's initialization
@@ -104,37 +914,6 @@ init -4 python in mas_sprites:
     # NOTE: render_key
 
     Y_OFFSET = -130
-
-    # TODO: please consider ways we can get submods to add their own filtesr
-    #   likely via APIs that they can use to add filters.
-    #   We should also move filter definitions to -99. 
-    # TODO: consider making the filter dict use Curryables so custom filters
-    #   can use non-Matrixcolor-based logic
-
-    # filter enums
-    FLT_DAY = "day"
-    FLT_NIGHT = "night"
-
-    # filter dict
-    FILTERS = {
-        FLT_DAY: store.im.matrix.identity(),
-        FLT_NIGHT: store.im.matrix.tint(0.59, 0.49, 0.55),
-    }
-
-    def _decide_filter():
-        """
-        Returns the appropriate filter to use
-
-        NOTE: this is currently not how we want to do this going forward.
-        Once we decide on lighting progression, then have this function call
-        that code.
-
-        RETURNS: desired filter
-        """
-        if store.morning_flag:
-            return FLT_DAY
-
-        return FLT_NIGHT
 
     # cache ids
     CID_FACE = 1 # NOTE: we should not use highlights for this
@@ -144,18 +923,20 @@ init -4 python in mas_sprites:
     CID_ACS = 5
     CID_TC = 6
     CID_HL = 7
+    CID_HLG = 8
+    CID_BG = 9 # TODO: maybe
 
     # several caches for images
 
     CACHE_TABLE = {
         CID_FACE: {},
         # the facial expression cache. Facial expressions are the most likely
-        # things to overlap across clothing, hair, and ACS, so we should cache 
+        # things to overlap across clothing, hair, and ACS, so we should cache
         # them together to maximize performance
         # key:
         #   tuple containing all sprite strings that may be used. None is fine
-        #   here. 
-        #   [0] - should be the filter code. 
+        #   here.
+        #   [0] - should be the filter code.
         #   [1] - should be pre/post (0 or 1)
         #   [2] - type of lean
         #   [3+] remaining values dependent on type:
@@ -178,7 +959,7 @@ init -4 python in mas_sprites:
         CID_BODY: {},
         # the body cache. This includes clothes and base sprites.
         # key:
-        #   tuple containing strings. 
+        #   tuple containing strings.
         #   [0] - should be the filter code.
         #   [1] - shoud be image path
         # value:
@@ -187,16 +968,16 @@ init -4 python in mas_sprites:
         CID_HAIR: {},
         # the hair cache
         # key:
-        #   tuple containing strings. 
+        #   tuple containing strings.
         #   [0] - should be the filter code.
         #   [1] - should be image path
         # value:
         #   image manip containing render, or None if should not be rendered
-   
+
         CID_ACS: {},
         # the ACS cache
         # key:
-        #   tuple containing strings. 
+        #   tuple containing strings.
         #   [0] - should be the filter code.
         #   [1] - acs name (id)
         #   [3] - poseid
@@ -221,6 +1002,17 @@ init -4 python in mas_sprites:
         #   tuple containing:
         #   [0] - cache ID - determines what sprite this highlight is for
         #   [1+] - the sprite's key
+        # value:
+        #   Image object, or None if should not be rendered
+
+        CID_HLG: {}
+        # the global highlight cache
+        # this should be used for anything that is not part of Monika sprite
+        # rendering system.
+        # key:
+        #   tuple containig:
+        #   [0] - filter
+        #   [1] - image path
         # value:
         #   Image object, or None if should not be rendered
     }
@@ -271,7 +1063,7 @@ init -4 python in mas_sprites:
             Constructor for a MASMOnikaRender object
 
             IN:
-                render_keys - image keys and ImageBase if needed. 
+                render_keys - image keys and ImageBase if needed.
                     See props.
                 flt - filter we are using (string)
                 xpos - xposition to blit objects with
@@ -363,7 +1155,7 @@ init -4 python in mas_sprites:
             """
             Render function
             """
-            self.flt = store.mas_sprites._decide_filter()
+            self.flt = store.mas_sprites.get_filter()
 
             renders = []
             for render_key in self.render_keys:
@@ -383,7 +1175,7 @@ init -4 python in mas_sprites:
             Returns a list of displayables we obtain
             NOTE: will also save to our cache
             """
-            self.flt = store.mas_sprites._decide_filter()
+            self.flt = store.mas_sprites.get_filter()
             disp_list = []
             for render_key in self.render_keys:
                 store.mas_sprites._cgha_im(disp_list, self.flt, render_key)
@@ -392,7 +1184,7 @@ init -4 python in mas_sprites:
 
 
     def _add_arms_rk(
-            rk_list, 
+            rk_list,
             arms,
             pfx,
             flt,
@@ -501,14 +1293,14 @@ init -4 python in mas_sprites:
 
     def _bhli(img_list, hlcode):
         """
-        Builds a 
+        Builds a
         High-
         Light
         Image using the base image path
 
         IN:
             img_list - list of strings that form the base image string
-                NOTE: we assume that the last item in this string is the 
+                NOTE: we assume that the last item in this string is the
                 FILE_EXT. This also assumes highlight codes are always inserted
                 right before the file extension.
             hlcode - highlight code to use. Can be None.
@@ -524,9 +1316,32 @@ init -4 python in mas_sprites:
         return store.Image("".join(hl_list))
 
 
+    def _bhlifp(img_path, hlcode):
+        """
+        Builds a
+        High-
+        Light
+        Image using an image's
+        File
+        Path
+
+        IN:
+            img_path - full filepath to an image, including extension.
+            hlcode - highlight code to use. Can be None
+
+        RETURNS: Image to use for highlight, or None if no highlight
+        """
+        if hlcode is None:
+            return None
+
+        # otherwise partition and build
+        pre_img, ext, ignore = img_path.partition(FILE_EXT)
+        return store.Image("".join((pre_img, HLITE_SUFFIX, hlcode, ext)))
+
+
     def _cgen_im(flt, key, cid, img_base):
         """
-        Checks cache for an im, 
+        Checks cache for an im,
         GENerates the im if not found
 
         IN:
@@ -686,7 +1501,7 @@ init -4 python in mas_sprites:
         IN:
             acs - MASAccessory object
             flt - filter to apply
-            arm_split - see MASAccessory.arm_split for codes. None for no 
+            arm_split - see MASAccessory.arm_split for codes. None for no
                 codes at all.
             leanpose - current pose
                 (Default: None)
@@ -700,7 +1515,7 @@ init -4 python in mas_sprites:
         poseid = acs.pose_map.get(leanpose, None)
 
         # get arm code if needed
-        # NOTE: we can be sure that a nonsplit acs will not be used in 
+        # NOTE: we can be sure that a nonsplit acs will not be used in
         #   a split context.
         if arm_split is None:
             arm_code = ""
@@ -748,7 +1563,7 @@ init -4 python in mas_sprites:
             arm_code,
             FILE_EXT,
         ]
-      
+
         # finally add the render key
         rk_list.append((
             img_key,
@@ -985,7 +1800,7 @@ init -4 python in mas_sprites:
             bcode- base code to use
 
         OUT:
-            rk_list - list to add render keys to 
+            rk_list - list to add render keys to
         """
         img_str = "".join((
             B_MAIN,
@@ -1001,7 +1816,7 @@ init -4 python in mas_sprites:
             return
 
         rk_list.append((img_key, CID_BODY, store.Image(img_str), None))
-    
+
 
     def _rk_base_body_lean_nh(rk_list, lean, flt, bcode):
         """
@@ -1375,7 +2190,7 @@ init -4 python in mas_sprites:
         # otherwise, time to generate the im
         if blush:
             rk_list.append((
-                img_key, 
+                img_key,
                 CID_FACE,
                 store.Image("".join((
                     F_T_MAIN,
@@ -1392,7 +2207,7 @@ init -4 python in mas_sprites:
         cache_face[img_key] = None
         cache_face[day_key] = None
 
-   
+
     def _rk_hair(rk_list, hair, flt, hair_key, lean):
         """
         Adds hair render key
@@ -1518,7 +2333,7 @@ init -4 python in mas_sprites:
             store.Image("".join(table_list)),
             hl_img
         ))
-        
+
 
 # main sprite compilation
 
@@ -1573,7 +2388,7 @@ init -4 python in mas_sprites:
                 hair and body
             acs_bse_list - sorted list of MASAccessories to draw between base
                 body and outfit
-            acs_bba_list - sorted list of MASAccessories to draw between 
+            acs_bba_list - sorted list of MASAccessories to draw between
                 body and back arms
             acs_ase_list - sorted list of MASAccessories to draw between base
                 arms and outfit
@@ -1689,7 +2504,6 @@ init -4 python in mas_sprites:
         # 13. table
         _rk_table(rk_list, tablechair, show_shadow, flt)
 
-        # TODO: add acs layer here (MAT - middle arms and table)
         # 14. mat-acs
         _rk_accessory_list(rk_list, acs_mat_list, flt, leanpose)
 
@@ -1775,11 +2589,18 @@ init -4 python in mas_sprites:
         return rk_list
 
 
-init -2 python:
+init -10 python:
 
     class MASFilterMap(object):
-        """
+        """SEALED
         The FilterMap connects filters to values
+
+        DO NOT EXTEND THIS CLASS. if you need similar functionality, just
+        make a wrapper class. There are functions in this class that will
+        cause crashes if used in unexpected contexts.
+
+        NOTE: you can make filtermaps with non-string values, just dont
+            use the hash/eq/ne operators.
 
         PROPERTIES:
             map - dict containg filter to string map
@@ -1788,13 +2609,24 @@ init -2 python:
         """
         import store.mas_sprites_json as msj
 
-        def __init__(self, default=None, **filter_pairs):
+        def __init__(self,
+                default=None,
+                cache=True,
+                verify=True,
+                **filter_pairs
+        ):
             """
             Constructor
 
             IN:
                 default - default code to apply to all filters
                     (Default: None)
+                cache - True will cache the MFM, False will not
+                    (Default: True)
+                verify - True will verify the filters, False will not.
+                    NOTE: if passing False, use the verify function to
+                    verify flts.
+                    (Default: True)
                 **filter_pairs - filter=val args to use. invalid filters are
                     ignored.
                     See FILTERS dict. Example:
@@ -1802,7 +2634,12 @@ init -2 python:
                         night="0"
             """
             self.map = MASFilterMap.clean_flt_pairs(default, filter_pairs)
-            store.mas_sprites.MFM_CACHE[hash(self)] = self
+
+            if verify:
+                self.verify()
+
+            if cache:
+                store.mas_sprites.MFM_CACHE[hash(self)] = self
 
         def __eq__(self, other):
             """
@@ -1915,7 +2752,7 @@ init -2 python:
             RETURNS: dict with cleaned filter pairs
             """
             output = {}
-            
+
             # cehck existing filter keys and apply defaults
             for flt in store.mas_sprites.FILTERS:
                 output[flt] = filter_pairs.get(flt, default)
@@ -1933,7 +2770,7 @@ init -2 python:
                     value: code to use as string
                     NOTE: default is assumed to already been set
 
-            RETURNS: hash that would be generated by a MASFilterMAp created 
+            RETURNS: hash that would be generated by a MASFilterMAp created
                 with the given filter pairs
             """
             # hash a tuple of this filtermap's map's values, using None for
@@ -1953,7 +2790,7 @@ init -2 python:
                 ind_lvl - indent lvl
                     NOTE: this handles loading/success log, so do not
                         increase indent level
-                prop_name - name of the prop this MASFilterMap object is 
+                prop_name - name of the prop this MASFilterMap object is
                     being created from
 
             OUT:
@@ -2080,6 +2917,133 @@ init -2 python:
 
             return vals
 
+        def verify(self):
+            """
+            Verifies all filters in this filter map. Raises exceptions if
+            bad filtesr are found.
+            """
+            for flt in self.map:
+                if not store.mas_sprites.is_filter(flt):
+                    raise MASInvalidFilterException(flt)
+
+
+    class MASFilterMapSimple(object):
+        """
+        MASFilterMap for simple implementations, aka filter - value pairs 
+        without type checks.
+
+        Classes that need MASFilterMap should just extend this one as a base.
+
+        This will NOT cache filter maps.
+
+        PROPERTIES:
+            None
+        """
+
+        def __init__(self, **filter_pairs):
+            """
+            Constructor
+
+            Passes values directly to the internal MFM
+
+            IN:
+                **filter_pairs - filter=val args to use. invalid filters
+                    are ignored.
+            """
+            self.__mfm = MASFilterMap(
+                default=None,
+                cache=False,
+                **filter_pairs
+            )
+
+        def flts(self):
+            """
+            Gets all filter names in this filter map
+
+            RETURNS: list of all filter names in this map
+            """
+            return self.__mfm.map.keys()
+
+        def get(self, flt, defval=None):
+            """
+            See MASFilterMap.get
+            """
+            return self.__mfm.get(flt, defval)
+
+        def _mfm(self):
+            """
+            Returns the intenral MASFilterMap. Only use if you know what you
+            are doing.
+
+            RETURNS: MASFilterMap
+            """
+            return self.__mfm
+
+
+    class MASFilterMapFallback(MASFilterMapSimple):
+        """
+        MASFilterMap that respects fallback mechanics.
+
+        Classes that need fallback behavior should just extend this one as a
+        base.
+
+        This will NOT cache filter maps.
+
+        PROPERTIES:
+            None
+        """
+
+        def __init__(self, **filter_pairs):
+            """
+            Constructor
+
+            IN:
+                **filter_pairs - filter=val args to use. invalid filters are
+                    ignored.
+            """
+            super(MASFilterMapFallback, self).__init__(**filter_pairs)
+
+        def get(self, flt, defval=None):
+            """
+            Gets value from map based on filter. This follows fallback
+            mechanics until a non-None value is found.
+
+            IN:
+                flt - filter to lookup
+                defval - default value to return if no non-None value is 
+                    found after exhausting all fallbacks.
+                    (Default: None)
+
+            REUTRNS: value for a given filter
+            """
+            value = self._raw_get(flt)
+            cur_flt = flt
+            while value is None:
+                nxt_flt = store.mas_sprites._rslv_flt(cur_flt)
+
+                if nxt_flt == cur_flt:
+                    # if flt doesnt change, we have reached teh bottom
+                    return defval
+
+                value = self._raw_get(nxt_flt)
+                cur_flt = nxt_flt
+
+            return value
+
+        def _raw_get(self, flt):
+            """
+            Gets value from map based on filter
+
+            IN:
+                flt - filter to lookup
+
+            RETURNS: value for the given filter
+            """
+            return super(MASFilterMapFallback, self).get(flt)
+
+
+init -2 python:
+
 
     def mas_drawmonika_rk(
             st,
@@ -2178,7 +3142,7 @@ init -2 python:
         pose_data = character._determine_poses(lean, arms)
 
         # determine filter to use
-        flt = store.mas_sprites._decide_filter()
+        flt = store.mas_sprites.get_filter()
 
         # generate sprite displayable
         sprite = store.mas_sprites.MASMonikaRender(
@@ -2222,7 +3186,7 @@ init -2 python:
             store.mas_sprites.LOC_H
         )
 
-        # finally apply zoom 
+        # finally apply zoom
         return Transform(sprite, zoom=store.mas_sprites.value_zoom), None
 
 
@@ -2249,8 +3213,8 @@ init -2 python:
         rk_list = []
 
         # decide the filter
-        flt = store.mas_sprites._decide_filter()
-        
+        flt = store.mas_sprites.get_filter()
+
         # now build the chair
         store.mas_sprites._rk_chair(rk_list, character.tablechair, flt)
 
@@ -2281,7 +3245,4 @@ init -2 python:
         )
 
         # finally appyl zoom and return
-        return Transform(sprite, zoom=store.mas_sprites.value_zoom), None 
-
-
-
+        return Transform(sprite, zoom=store.mas_sprites.value_zoom), None

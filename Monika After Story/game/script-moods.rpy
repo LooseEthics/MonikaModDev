@@ -81,7 +81,8 @@ label mas_mood_start:
         filtered_moods = Event.filterEvents(
             mas_moods.mood_db,
             unlocked=True,
-            aff=mas_curr_affection
+            aff=mas_curr_affection,
+            flag_ban=EV_FLAG_HFM
         )
 
         # build menu list
@@ -604,9 +605,9 @@ label mas_mood_bored:
 
     python:
         unlockedgames = [
-            game
-            for game in persistent.game_unlocks
-            if persistent.game_unlocks[game]
+            game_ev.prompt.lower()
+            for game_ev in mas_games.game_db.itervalues()
+            if mas_isGameUnlocked(game_ev.prompt)
         ]
 
         gamepicked = renpy.random.choice(unlockedgames)

@@ -96,14 +96,16 @@ label monika_short_stories_menu:
                 mas_stories.story_database,
                 category=(True,[mas_stories.TYPE_SCARY]),
                 pool=False,
-                aff=mas_curr_affection
+                aff=mas_curr_affection,
+                flag_ban=EV_FLAG_HFM
             )
         else:
             stories = renpy.store.Event.filterEvents(
                 mas_stories.story_database,
                 excl_cat=list(),
                 pool=False,
-                aff=mas_curr_affection
+                aff=mas_curr_affection,
+                flag_ban=EV_FLAG_HFM
             )
 
         # build menu list
@@ -456,7 +458,7 @@ label mas_story_fisherman:
     call mas_story_begin
     m 1euc "A poor Fisherman, who lived on the fish he caught, had bad luck one day and caught nothing but a very small fry."
     m 1eud "The Fisherman was about to put it in his basket when the little Fish spoke."
-    m 3ekd "'Please spare me, Mr. Fisherman! I am so small it is not worth while to carry me home. When I am bigger, I shall make you a much better meal!'"
+    m 3ekd "'Please spare me, Mr. Fisherman! I am so small it is not worthwhile to carry me home. When I am bigger, I shall make you a much better meal!'"
     m 1eud "But the Fisherman quickly put the fish into his basket."
     m 3tfu "'How foolish I should be,' he said, 'to throw you back. However small you may be, you are better than nothing at all.'"
     m 3esa "The moral of this story is, a small gain is worth more than a large promise."
@@ -602,7 +604,7 @@ label mas_story_genie_end:
     m 3rksdld "He never told his friends that he wasn't human, as he still wanted to be treated as one."
     m 1euc "One day, as he was travelling with one of his friends, they came across a genie who would grant each of them one wish."
     m 1dsc "This made him think about everything he had been through;{w=0.5} from back to when he granted wishes to when he gave it up for a simple life."
-    m 1dsd "...Everything that had lead up to this moment, where he could make his own wish for the first time in a long while."
+    m 1dsd "...Everything that had led up to this moment, where he could make his own wish for the first time in a long while."
     m 1dsc "..."
     m 2eud "He wished to die."
     m 2ekc "Confused, his friend asked why and where it came from all of a sudden."
@@ -780,7 +782,7 @@ label mas_story_o_tei:
     m 3esa "As she came to, she had no memory of what happened at the inn."
     m 1hua "Not long after, Kenji married her as soon as they could, and lived on happily for the rest of their lives."
     return
-    
+
 init 5 python:
     addEvent(Event(persistent._mas_story_database,eventlabel="mas_story_crow_and_pitcher",
         prompt="The Crow and the Pitcher",unlocked=False),code="STY")
@@ -856,7 +858,6 @@ label mas_scary_story_setup:
     $ play_song(None, fadeout=1.0)
     pause 1.0
 
-    $ mas_temp_m_flag = morning_flag
     $ mas_temp_zoom_level = store.mas_sprites.zoom_level
     call monika_zoom_transition_reset(1.0)
 
@@ -902,8 +903,6 @@ label mas_scary_story_cleanup:
     m 3eua "[story_end_quip]"
     show monika 1dsc
     pause 1.0
-
-    $ morning_flag = mas_temp_m_flag
 
     #If in O31 mode, weather doesn't need to change, nor vignette. No need to spaceroom call
     if not persistent._mas_o31_in_o31_mode:
