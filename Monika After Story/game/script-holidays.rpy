@@ -2666,9 +2666,6 @@ label monika_aiwfc:
             m 3hub "Make sure you have your volume up!"
             m 1huu ".{w=0.5}.{w=0.5}.{nw}"
 
-    #Get current song
-    $ curr_song = songs.current_track
-
     call monika_aiwfc_song
 
     #NOTE: This must be a shown count check as this dialogue should only be here on first viewing of this topic
@@ -2684,10 +2681,6 @@ label monika_aiwfc:
         m 1ekbsa "You'll always be the only gift I'll ever need."
         m 1ekbfa "I love you~"
 
-    #Since the lullaby can slip in here because of the queue, we need to make sure we don't play that
-    if curr_song != store.songs.FP_MONIKA_LULLABY:
-        $ play_song(curr_song, fadein=1.0)
-
     #Unlock the song
     $ mas_unlockEVL("mas_song_aiwfc", "SNG")
     return "no_unlock|love"
@@ -2695,22 +2688,7 @@ label monika_aiwfc:
 
 label monika_aiwfc_song:
 
-    #Disable text speed, escape button and music button for this
-    $ mas_disableTextSpeed()
-    $ disable_esc()
-    $ mas_MUMURaiseShield()
-
-    # always unmute the music channel (or at least attempt to)
-    # TODO: there should probably be handling for sayori name case.
-    if songs.getVolume("music") == 0.0:
-        $ renpy.music.set_volume(1.0, channel="music")
-
-    # save background sound for later
-    $ amb_vol = songs.getVolume("backsound")
-
-    $ play_song(None, 1.0)
-    $ renpy.music.set_volume(0.0, 1.0, "background")
-    $ renpy.music.set_volume(0.0, 1.0, "backsound")
+    call mas_timed_text_events_prep
 
     $ play_song("mod_assets/bgm/aiwfc.ogg",loop=False)
     m 1eub "{i}{cps=9}I don't want{/cps}{cps=20} a lot{/cps}{cps=11} for Christmas{w=0.09}{/cps}{/i}{nw}"
@@ -2745,15 +2723,8 @@ label monika_aiwfc_song:
     m 4hksdlb "{i}{cps=10}What more{/cps}{cps=15} can I{/cps}{cps=8} doooo?{w=0.3}{/cps}{/i}{nw}"
     m 4ekbfb "{i}{cps=20}Cause baby{/cps}{cps=12} all I want for Christmas{w=0.3} is yoooooooou~{w=2.3}{/cps}{/i}{nw}"
     m "{i}{cps=9}Yoooooooou, baaaaby~{w=2.5}{/cps}{/i}{nw}"
-    stop music fadeout 0.5
 
-    #Now we re-enable text speed, escape button and music button
-    $ mas_resetTextSpeed()
-    $ enable_esc()
-    $ mas_MUMUDropShield()
-
-    $ renpy.music.set_volume(amb_vol, 1.0, "background")
-    $ renpy.music.set_volume(amb_vol, 1.0, "backsound")
+    call mas_timed_text_events_wrapup
     return
 
 init 5 python:
@@ -3586,7 +3557,7 @@ label mas_nye_monika_nyd:
 
 label mas_nye_monika_nyd_fresh_start:
     m 2ekc "How about we put all that in the past, forget about last year, and focus on a new beginning this year?"
-    m 4ekc "It's not too late for us, [player], we can still make each other so happy."
+    m 4ekc "It's not too late for us, [player]. We can still make each other so happy."
     m 4eka "It's all I've ever wanted."
 
     m "What do you say, [player]?{nw}"
@@ -4001,7 +3972,7 @@ label mas_nye_monika_nye_dress_intro:
         m 3eua "Maybe you guessed it already, but it's because of the color choice."
 
     m "White represents a lot of positive feelings, like goodness, purity, safety..."
-    m 3eub "However, what I wanted this outfit to highlight was a succesful beginning."
+    m 3eub "However, what I wanted this outfit to highlight was a successful beginning."
 
     #If we fresh started last year
     if mas_HistWasFirstValueIn(True, datetime.date.today().year - 1, "pm.actions.monika.got_fresh_start"):
@@ -4688,7 +4659,7 @@ label mas_player_bday_card:
     m 6dkbsu "..."
     if mas_isMonikaBirthday():
         m 6sub "Oh!"
-        m 6ekbsu "I made a card for you, [player], I hope you like it..."
+        m 6ekbsu "I made a card for you, [player]. I hope you like it..."
     elif not mas_HistVerify("player_bday.spent_time",True)[0]:
         m 6ekbsu "I...I also made a card for you, [player]. I hope you like it..."
     else:
@@ -5442,7 +5413,7 @@ label mas_f14_sun_dress_outro:
 label mas_f14_intro_generic:
     m 1ekbsa "I'm just so grateful you are spending time with me today."
     m 3ekbsu "Spending time with the one you love, {w=0.2}that's all anyone can ask for on Valentine's Day."
-    m 3ekbsa "I don't care if we go on a romantice date, or just spend the day together here..."
+    m 3ekbsa "I don't care if we go on a romantic date, or just spend the day together here..."
     m 1fkbsu "It really doesn't matter to me as long as we're together."
     return
 

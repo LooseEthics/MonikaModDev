@@ -969,6 +969,7 @@ init -810 python:
             "_mas_pm_driving_learning": "pm.lifestyle.learning_to_drive",
             "_mas_pm_driving_post_accident": "pm.lifestyle.driving_post_accident",
             "_mas_pm_is_fast_reader": "pm.lifestyle.reads_fast",
+            "_mas_pm_is_trans": "pm.lifestyle.is_trans",
 
             # lifestyle / ring
             "_mas_pm_wearsRing": "pm.lifestyle.ring.wears_one",
@@ -980,6 +981,7 @@ init -810 python:
             # lifestyle / smoking
             "_mas_pm_do_smoke": "pm.lifestyle.smoking.smokes",
             "_mas_pm_do_smoke_quit": "pm.lifestyle.smoking.trying_to_quit",
+            "_mas_pm_do_smoke_quit_succeeded_before": "pm.lifestyle.smoking.successfully_quit_before",
 
             # lifestyle / food
             "_mas_pm_eat_fast_food": "pm.lifestyle.food.eats_fast_food",
@@ -1039,6 +1041,7 @@ init -810 python:
             "_mas_pm_listened_to_grad_speech": "pm.actions.monika.listened_to_grad_speech",
             "_mas_pm_got_a_fresh_start": "pm.actions.monika.got_fresh_start",
             "_mas_pm_failed_fresh_start": "pm.actions.monika.failed_fresh_start",
+            "_mas_pm_called_moni_a_bad_name": "pm.actions.monika.called_bad_name",
 
             # actions / prom
             "_mas_pm_gone_to_prom": "pm.actions.prom.went",
